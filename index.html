@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CAPTCHAテスト</title>
+<style>
+:root{font-family:system-ui,-apple-system,"Noto Sans JP",sans-serif;color:#20252b;background:#f5f7fa}
+*{box-sizing:border-box}
+body{margin:0;padding:24px 14px 48px}
+main{max-width:1040px;margin:auto}
+header{text-align:center;margin:8px 0 22px}
+h1{font-size:clamp(24px,4vw,32px);margin:0 0 8px}
+.muted{color:#68717d;font-size:14px}
+.panel{background:#fff;border:1px solid #e1e6ed;border-radius:16px;padding:22px;box-shadow:0 5px 20px #16243a0b}
+#status{margin:12px 0;color:#596574;text-align:center}
+#progress{text-align:center;font-weight:650;color:#596574;margin:4px 0 16px}
+#prompt{text-align:center;font-size:clamp(19px,3vw,26px);font-weight:700;line-height:1.6;margin:18px 0 24px;overflow-wrap:anywhere}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.choice{border:2px solid #cbd2dc;border-radius:12px;background:#fff;padding:0;overflow:hidden;cursor:pointer;aspect-ratio:320/220;min-width:0;display:flex;align-items:center;justify-content:center;transition:border-color .12s,transform .12s}
+.choice:hover:not(:disabled){border-color:#3478d4;transform:translateY(-1px)}
+.choice:focus-visible,button:focus-visible{outline:3px solid #79aaf0;outline-offset:3px}
+.choice img{width:100%;height:100%;object-fit:contain;display:block}
+.choice:disabled{cursor:default}
+.actions{display:flex;justify-content:center;gap:12px;margin-top:20px;flex-wrap:wrap}
+button.action{min-height:44px;padding:10px 22px;border:0;border-radius:10px;font:inherit;font-weight:650;cursor:pointer;background:#2368c4;color:white}
+button.action.secondary{background:#e7edf5;color:#27384d}
+button.action:disabled{opacity:.55;cursor:wait}
+#feedback{text-align:center;min-height:30px;margin-top:16px;font-size:17px}
+.good{color:#16803c;font-weight:700}.bad{color:#c23535;font-weight:700}
+table{width:100%;border-collapse:collapse;text-align:center;margin-top:12px}
+th,td{padding:10px 6px;border-bottom:1px solid #e5e9ef}
+th{background:#eef2f7}
+#summary{margin-top:16px}
+#start{text-align:center}
+#start h2{font-size:24px;margin:4px 0 12px}
+#start p{line-height:1.8}
+.instructions{max-width:640px;margin:18px auto;text-align:left;background:#f5f7fa;border-radius:12px;padding:14px 18px}
+.instructions li{margin:6px 0}
+@media(max-width:650px){body{padding:12px 8px 30px}.panel{padding:14px}.grid{gap:7px}.choice{border-radius:8px}th,td{font-size:13px;padding:8px 3px}}
+@media(max-width:380px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+</style>
+</head>
+<body>
+<main>
+<header><h1>CAPTCHAテスト</h1><p class="muted">表示された文章に合う画像を1つ選んでください。</p></header>
+<section class="panel" aria-live="polite">
+<div id="status">問題データを読み込んでいます…</div>
+<div id="start" hidden>
+<h2>実験へのご協力ありがとうございます</h2>
+<p>これからCAPTCHA認識テストを行います。</p>
+<div class="instructions">
+<p><b>テストについて</b></p>
+<ul>
+<li>問題は全9問です（難易度ごとに3問）。</li>
+<li>表示された文章に合う画像を1つ選んでください。</li>
+<li>各問題の回答時間を計測します。</li>
+<li>回答は各問題の回答後に自動送信されます。</li>
+</ul>
+</div>
+<div class="actions"><button class="action" id="startButton">実験を開始する</button></div>
+<p class="muted">開始ボタンを押すと、1問目の計測が始まります。</p>
+</div>
+<div id="test" hidden>
+<div id="progress"></div><div id="prompt"></div>
+<div class="grid" id="choices"></div><div id="feedback" aria-live="polite"></div>
+<div class="actions"><button class="action" id="next" hidden>次の問題へ</button></div>
+</div>
+<div id="summary" hidden></div>
+</section>
+</main>
+<script>
+"use strict";
+const LEVELS=["Easy","Normal","Hard"], PER_LEVEL=3;
+// Google Apps ScriptのウェブアプリURLを設定すると回答を自動送信します。
+const GOOGLE_SCRIPT_URL="ここにGoogle Apps ScriptのウェブアプリURLを貼り付け";
+const participantId=(crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random().toString(36).slice(2)}`);
+let runId="";
+let questions=[],index=0,results=[],startedAt=null,answered=false,currentButtons=[];
+const $=id=>document.getElementById(id);
+const statusEl=$("status"),testEl=$("test"),promptEl=$("prompt"),choicesEl=$("choices"),
+progressEl=$("progress"),feedbackEl=$("feedback"),nextEl=$("next"),summaryEl=$("summary");
+
+function shuffle(items){
+ const a=[...items];
+ for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}
+ return a;
+}
+function chooseQuestions(data){
+ const selected=[];
+ for(const level of LEVELS){
+  const pool=data[level];
+  if(!Array.isArray(pool)||pool.length<PER_LEVEL)throw new Error(`${level}の問題数が不足しています。`);
+  for(const question of shuffle(pool).slice(0,PER_LEVEL))selected.push({level,question});
+ }
+ return selected;
+}
+function imageUrl(path){return encodeURI(path);}
+async function prepareQuestion(item){
+ const q=item.question;
+ if(!q||!Array.isArray(q.choices)||!Array.isArray(q.image_paths))throw new Error("問題データの形式が正しくありません。");
+ if(q.choices.length!==6||q.image_paths.length!==6)throw new Error("各問題には6つの選択肢と画像パスが必要です。");
+ const correctIndex=q.choices.findIndex(c=>c.type==="正解");
+ if(correctIndex<0)throw new Error("正解の選択肢が見つかりません。");
+ const images=await Promise.all(q.image_paths.map(async path=>{
+  const img=new Image();img.src=imageUrl(path);
+  if(img.decode)await img.decode();
+  else await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=()=>reject(new Error(`画像を読み込めません: ${path}`));});
+  return img;
+ }));
+ return {q,correctIndex,images};
+}
+async function renderQuestion(){
+ if(index>=questions.length){showSummary();return;}
+ answered=false;startedAt=null;nextEl.hidden=true;nextEl.disabled=false;
+ nextEl.textContent="次の問題へ";feedbackEl.textContent="";
+ statusEl.textContent="画像を準備しています…";testEl.hidden=true;summaryEl.hidden=true;
+ try{
+  const item=questions[index],prepared=await prepareQuestion(item);
+  progressEl.textContent=`問題 ${index+1} / ${questions.length}　難易度：${item.level}`;
+  promptEl.textContent=prepared.q.sentence;choicesEl.replaceChildren();currentButtons=[];
+  prepared.images.forEach((img,i)=>{
+   const button=document.createElement("button");button.type="button";button.className="choice";
+   button.setAttribute("aria-label",`${i+1}番の画像を選択`);
+   const shownImage=document.createElement("img");shownImage.src=img.src;shownImage.alt=`${i+1}番の選択肢`;
+   button.appendChild(shownImage);button.addEventListener("click",()=>submitAnswer(i));
+   currentButtons.push(button);choicesEl.appendChild(button);
+  });
+  statusEl.textContent="";testEl.hidden=false;
+  await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  if(!answered&&index<questions.length)startedAt=performance.now();
+ }catch(error){statusEl.textContent=`読み込みエラー：${error.message}`;}
+}
+function sendResult(row){
+ if(!GOOGLE_SCRIPT_URL.startsWith("https://script.google.com/macros/s/"))return;
+ const payload={...row,参加者ID:participantId,実施ID:runId,送信日時:new Date().toISOString()};
+ // no-corsで単純リクエストとして送信。応答本文はブラウザから読めないため、保存確認はシート側で行う。
+ fetch(GOOGLE_SCRIPT_URL,{method:"POST",mode:"no-cors",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify(payload),keepalive:true}).catch(error=>console.error("回答送信エラー",error));
+}
+function submitAnswer(selected){
+ if(answered||startedAt===null)return;
+ answered=true;const elapsed=(performance.now()-startedAt)/1000;
+ const item=questions[index],q=item.question;
+ const correctIndex=q.choices.findIndex(c=>c.type==="正解"),isCorrect=selected===correctIndex;
+ results.push({"難易度":item.level,"問題番号":index+1,"問題文":q.sentence,
+ "選択番号":selected+1,"正解番号":correctIndex+1,"正誤":isCorrect?"正解":"不正解",
+ "解答時間（秒）":Number(elapsed.toFixed(3))});
+ sendResult(results[results.length-1]);
+ currentButtons.forEach(button=>button.disabled=true);
+ feedbackEl.innerHTML=isCorrect?'<span class="good">正解！</span>':'<span class="bad">不正解</span>';
+ feedbackEl.insertAdjacentHTML("beforeend",`<p>正解：${correctIndex+1}番　解答時間：${elapsed.toFixed(2)}秒</p>`);
+ nextEl.textContent=index===questions.length-1?"結果を見る":"次の問題へ";nextEl.hidden=false;
+}
+function csvEscape(value){return `"${String(value??"").replaceAll('"','""')}"`;}
+function downloadCsv(){
+ const fields=["難易度","問題番号","問題文","選択番号","正解番号","正誤","解答時間（秒）"];
+ const csv="\uFEFF"+[fields.map(csvEscape).join(","),...results.map(row=>fields.map(field=>csvEscape(row[field])).join(","))].join("\r\n");
+ const blob=new Blob([csv],{type:"text/csv;charset=utf-8"}),url=URL.createObjectURL(blob);
+ const a=document.createElement("a");a.href=url;a.download=`human_test_${new Date().toISOString().replace(/[:.]/g,"-")}.csv`;
+ a.click();URL.revokeObjectURL(url);
+}
+function showSummary(){
+ testEl.hidden=true;statusEl.textContent="";
+ const total=results.length,correct=results.filter(r=>r["正誤"]==="正解").length,rate=total?correct/total*100:0;
+ let rows="";
+ for(const level of LEVELS){
+  const data=results.filter(r=>r["難易度"]===level);if(!data.length)continue;
+  const c=data.filter(r=>r["正誤"]==="正解").length,avg=data.reduce((s,r)=>s+r["解答時間（秒）"],0)/data.length;
+  rows+=`<tr><td>${level}</td><td>${c}/${data.length}</td><td>${(c/data.length*100).toFixed(1)}%</td><td>${avg.toFixed(2)}秒</td></tr>`;
+ }
+ summaryEl.innerHTML=`<div style="text-align:center"><h2>ご協力ありがとうございました</h2><p>これで実験は終了です。ご協力ありがとうございました。</p><p class="muted">回答データは自動送信されます。必要な場合はCSVも保存できます。</p></div><p style="font-size:22px">全体の正答率：<b>${rate.toFixed(1)}%</b>（${correct}/${total}問）</p>
+ <table><thead><tr><th>難易度</th><th>正解数</th><th>正答率</th><th>平均解答時間</th></tr></thead><tbody>${rows}</tbody></table>
+ <div class="actions"><button class="action secondary" id="download">回答結果をCSVで保存（任意）</button><button class="action secondary" id="restart">もう一度テストする</button></div>`;
+ summaryEl.hidden=false;$("download").addEventListener("click",downloadCsv);$("restart").addEventListener("click",restartTest);
+}
+async function startTest(){index=0;results=[];runId=(crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random().toString(36).slice(2)}`);questions=chooseQuestions(window.CAPTCHA_DATA);$("start").hidden=true;summaryEl.hidden=true;await renderQuestion();}
+async function restartTest(){
+ const button=$("restart");if(button)button.disabled=true;
+ try{await startTest();}catch(error){statusEl.textContent=`開始できません：${error.message}`;}
+ finally{if(button)button.disabled=false;}
+}
+nextEl.addEventListener("click",async()=>{
+ if(!answered)return;nextEl.disabled=true;index++;await renderQuestion();
+});
+(async function init(){
+ try{
+  const response=await fetch("./questions.json",{cache:"no-store"});
+  if(!response.ok)throw new Error("questions.jsonを読み込めません。");
+  window.CAPTCHA_DATA=await response.json();
+  statusEl.textContent="";
+  $("start").hidden=false;
+  $("startButton").addEventListener("click",async()=>{
+   $("startButton").disabled=true;
+   try{await startTest();}
+   catch(error){statusEl.textContent=`開始できません：${error.message}`;}
+   finally{$("startButton").disabled=false;}
+  });
+ }catch(error){statusEl.textContent=`初期化エラー：${error.message}（questions.jsonと画像フォルダを同じサイトに配置してください）`;}
+})();
+</script>
+</body>
+</html>
